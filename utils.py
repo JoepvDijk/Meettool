@@ -137,15 +137,13 @@ def make_label_object(shape_id: str, text: str, x: float, y: float, font_size: i
         "fill": "rgb(255,0,0)",
         "fontSize": font_size,
         "fontWeight": "bold",
-        "selectable": False,
-        "evented": False,
+        "selectable": True,
+        "evented": True,
         "editable": False,
-        "hasControls": False,
-        "hasBorders": False,
-        "lockMovementX": True,
-        "lockMovementY": True,
+        "hasControls": True,
+        "hasBorders": True,
         "isLabel": True,
-        "labelForId": shape_id,
+        "labelFor": shape_id,
     }
 
 
