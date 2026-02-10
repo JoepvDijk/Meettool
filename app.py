@@ -5,15 +5,17 @@ from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 
 from utils import (
+    annotate_image,
+    compute_measurement,
     create_annotated_image,
-    csv_row,
-    label_position_from_object,
+    csv_rows,
+    extract_geometry,
     load_scale,
-    measurement_from_canvas_object,
     save_scale,
 )
 
 DEFAULT_SCALE = 1.342281879  # 400 µm / 298 px
+MAX_W = 900
 
 st.set_page_config(page_title="Microscope Measurement Tool", layout="wide")
 st.title("Microscope Measurement Tool")
@@ -53,6 +55,12 @@ if not uploaded_file:
 image = Image.open(uploaded_file)
 img_w, img_h = image.size
 
+display_w = min(img_w, MAX_W)
+display_h = int(img_h * (display_w / img_w))
+scale_x = img_w / display_w
+scale_y = img_h / display_h
+canvas_to_img_scale = (scale_x, scale_y)
+
 if st.session_state.calibration_mode:
     st.warning("Calibration mode enabled: draw one LINE over the known scale bar.")
     drawing_mode = "line"
@@ -64,8 +72,8 @@ canvas_result = st_canvas(
     stroke_width=2,
     stroke_color="#ff0000",
     background_image=image,
-    height=img_h,
-    width=img_w,
+    height=display_h,
+    width=display_w,
     drawing_mode=drawing_mode,
     key="canvas",
 )
@@ -78,41 +86,97 @@ if not objects:
     st.info("Draw a shape to see measurements.")
     st.stop()
 
-latest_obj = objects[-1]
-active_tool = "Line" if st.session_state.calibration_mode else selected_tool
-measurement_px = measurement_from_canvas_object(latest_obj, active_tool)
+measurements = []
+line_geometries = []
 
-if measurement_px <= 0:
-    st.error("Invalid shape measurement (0 px). Please draw again.")
+for idx, obj in enumerate(objects, start=1):
+    geom = extract_geometry(obj)
+    if not geom:
+        continue
+
+    # Convert measurement into full-resolution image pixels.
+    if geom["type"] == "line":
+        x1 = geom["x1"] * scale_x
+        y1 = geom["y1"] * scale_y
+        x2 = geom["x2"] * scale_x
+        y2 = geom["y2"] * scale_y
+        measurement_px = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+        line_geometries.append({"idx": idx, "measurement_px": measurement_px})
+        tool_name = "Line"
+    else:
+        r = geom["r"] * ((scale_x + scale_y) / 2.0)
+        measurement_px = 2.0 * r
+        tool_name = "Circle"
+
+    if measurement_px <= 0:
+        continue
+
+    measurement_um = measurement_px * st.session_state.scale_um_per_px
+    measurements.append(
+        {
+            "index": idx,
+            "tool": tool_name,
+            "measurement_px": measurement_px,
+            "measurement_um": measurement_um,
+        }
+    )
+
+if not measurements:
+    st.info("No valid measurable shapes found yet.")
     st.stop()
 
 if st.session_state.calibration_mode:
-    calibrated_scale = known_length_um / measurement_px
-    st.write(f"Calibration line length: **{measurement_px:.2f} px**")
-    st.write(f"Computed scale: **{calibrated_scale:.9f} µm/px**")
-
-    if st.button("Save scale"):
-        if measurement_px <= 0:
+    if not line_geometries:
+        st.info("Calibration mode needs at least one line.")
+    else:
+        latest_line = line_geometries[-1]
+        line_px = latest_line["measurement_px"]
+        if line_px <= 0:
             st.error("Invalid calibration: line length must be greater than 0 px.")
         else:
-            st.session_state.scale_um_per_px = calibrated_scale
-            save_scale(calibrated_scale)
-            st.session_state.calibration_mode = False
-            st.success("Scale saved to settings.json")
-    st.stop()
+            calibrated_scale = known_length_um / line_px
+            st.caption(
+                f"Calibration line (latest line #{latest_line['idx']}): {line_px:.2f} px -> {calibrated_scale:.9f} µm/px"
+            )
+            if st.button("Save scale"):
+                st.session_state.scale_um_per_px = calibrated_scale
+                save_scale(calibrated_scale)
+                st.success("Scale saved to settings.json")
+                st.session_state.calibration_mode = False
 
-measurement_um = measurement_px * st.session_state.scale_um_per_px
-metric_name = "Length" if selected_tool == "Line" else "Diameter"
+annotated_image = annotate_image(
+    image,
+    objects,
+    scale_um_per_px=st.session_state.scale_um_per_px,
+    canvas_to_img_scale=canvas_to_img_scale,
+)
+st.image(annotated_image, caption="Annotated preview", width=display_w)
 
-st.subheader("Measurement")
-st.write(f"{metric_name} (px): **{measurement_px:.2f}**")
-st.write(f"{metric_name} (µm): **{measurement_um:.2f}**")
+st.caption(
+    f"Shapes: {len(measurements)} | Scale: {st.session_state.scale_um_per_px:.9f} µm/px"
+)
 
-label_text = f"{metric_name}: {measurement_um:.2f} µm"
-label_x, label_y = label_position_from_object(latest_obj, selected_tool)
-st.caption(f"Overlay label position: x={label_x:.1f}, y={label_y:.1f} | {label_text}")
+table_rows = []
+for m in measurements:
+    metric = "Length" if m["tool"] == "Line" else "Diameter"
+    table_rows.append(
+        {
+            "#": m["index"],
+            "Tool": m["tool"],
+            "Metric": metric,
+            "Pixels": f"{m['measurement_px']:.2f}",
+            "µm": f"{m['measurement_um']:.2f}",
+        }
+    )
 
-annotated_png = create_annotated_image(image, latest_obj, selected_tool, label_text)
+st.dataframe(table_rows, hide_index=True, use_container_width=True)
+
+annotated_png = create_annotated_image(
+    image,
+    objects,
+    scale_um_per_px=st.session_state.scale_um_per_px,
+    canvas_to_img_scale=canvas_to_img_scale,
+)
 st.download_button(
     "Download annotated image",
     data=annotated_png,
@@ -120,14 +184,11 @@ st.download_button(
     mime="image/png",
 )
 
-csv_data = csv_row(
+csv_data = csv_rows(
     filename=uploaded_file.name,
-    tool=selected_tool,
-    measurement_px=measurement_px,
-    measurement_um=measurement_um,
+    measurements=measurements,
     scale_um_per_px=st.session_state.scale_um_per_px,
 )
-
 st.download_button(
     "Download measurements CSV",
     data=StringIO(csv_data).getvalue(),
