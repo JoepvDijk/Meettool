@@ -202,9 +202,12 @@ def _geometry_to_image_space(geom: dict, canvas_to_img_scale: tuple[float, float
 
 def _get_font_for_size(size: int) -> ImageFont.ImageFont:
     try:
-        return ImageFont.truetype("DejaVuSans.ttf", size=size)
+        return ImageFont.truetype("DejaVuSans-Bold.ttf", size=size)
     except OSError:
-        return ImageFont.load_default()
+        try:
+            return ImageFont.truetype("DejaVuSans.ttf", size=size)
+        except OSError:
+            return ImageFont.load_default()
 
 
 def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> tuple[int, int]:
@@ -248,13 +251,11 @@ def annotate_image(
     draw = ImageDraw.Draw(image)
 
     img_w, _ = image.size
-    font_size = max(18, int(img_w * 0.02))
+    font_size = max(40, int(img_w * 0.04))
     font = _get_font_for_size(font_size)
 
     stroke = 5
     color = (255, 0, 0)
-    pad = 8
-
     for obj in objects:
         geom = extract_geometry(obj)
         if not geom:
@@ -285,10 +286,6 @@ def annotate_image(
 
         text_w, text_h = _text_size(draw, label_text, font)
         tx, ty = _clamp_label(label_x, label_y, (text_w, text_h), image.size, margin=5)
-        draw.rectangle(
-            [(tx - pad, ty - pad), (tx + text_w + pad, ty + text_h + pad)],
-            fill=(255, 255, 255),
-        )
         draw.text((tx, ty), label_text, fill=color, font=font)
 
     return image
