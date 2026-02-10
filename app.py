@@ -6,10 +6,10 @@ from streamlit_drawable_canvas import st_canvas
 
 from utils import (
     annotate_image,
-    compute_measurement,
     create_annotated_image,
     csv_rows,
     extract_geometry,
+    get_annotation_debug_info,
     load_scale,
     save_scale,
 )
@@ -60,6 +60,7 @@ display_h = int(img_h * (display_w / img_w))
 scale_x = img_w / display_w
 scale_y = img_h / display_h
 canvas_to_img_scale = (scale_x, scale_y)
+debug_info = get_annotation_debug_info(img_w)
 
 if st.session_state.calibration_mode:
     st.warning("Calibration mode enabled: draw one LINE over the known scale bar.")
@@ -151,6 +152,13 @@ annotated_image = annotate_image(
     canvas_to_img_scale=canvas_to_img_scale,
 )
 st.image(annotated_image, caption="Annotated preview", width=display_w)
+if debug_info["font_is_default"]:
+    st.warning("TTF font not found, using default font (will be small).")
+st.caption(
+    "Debug: "
+    f"img=({img_w}x{img_h}) | display=({display_w}x{display_h}) | "
+    f"font={debug_info['font_path']} | font_size={debug_info['font_size']}"
+)
 
 st.caption(
     f"Shapes: {len(measurements)} | Scale: {st.session_state.scale_um_per_px:.9f} µm/px"

@@ -7,6 +7,13 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 SETTINGS_FILE = Path("settings.json")
+FONT_CANDIDATES = [
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/Library/Fonts/Arial.ttf",
+    "/System/Library/Fonts/Supplemental/Helvetica.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+]
 
 
 def load_scale(default_scale: float) -> float:
@@ -200,14 +207,27 @@ def _geometry_to_image_space(geom: dict, canvas_to_img_scale: tuple[float, float
     }
 
 
-def _get_font_for_size(size: int) -> ImageFont.ImageFont:
-    try:
-        return ImageFont.truetype("DejaVuSans-Bold.ttf", size=size)
-    except OSError:
+def _get_font_for_size(size: int) -> tuple[ImageFont.ImageFont, str, bool]:
+    for path_str in FONT_CANDIDATES:
+        path = Path(path_str)
+        if not path.exists():
+            continue
         try:
-            return ImageFont.truetype("DejaVuSans.ttf", size=size)
+            return ImageFont.truetype(str(path), size=size), str(path), False
         except OSError:
-            return ImageFont.load_default()
+            continue
+    return ImageFont.load_default(), "default", True
+
+
+def get_annotation_debug_info(img_w: int) -> dict:
+    """Expose font sizing/loading details for UI debugging."""
+    font_size = max(60, int(img_w * 0.05))
+    _, font_path, is_default = _get_font_for_size(font_size)
+    return {
+        "font_size": font_size,
+        "font_path": font_path,
+        "font_is_default": is_default,
+    }
 
 
 def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> tuple[int, int]:
@@ -235,9 +255,7 @@ def _clamp_label(
 
 
 def _label_for_measurement(geom_type: str, measurement_um: float) -> str:
-    if geom_type == "line":
-        return f"Length: {measurement_um:.2f} µm"
-    return f"Diameter: {measurement_um:.2f} µm"
+    return f"{measurement_um:.2f} µm"
 
 
 def annotate_image(
@@ -251,8 +269,8 @@ def annotate_image(
     draw = ImageDraw.Draw(image)
 
     img_w, _ = image.size
-    font_size = max(40, int(img_w * 0.04))
-    font = _get_font_for_size(font_size)
+    font_size = max(60, int(img_w * 0.05))
+    font, _, _ = _get_font_for_size(font_size)
 
     stroke = 5
     color = (255, 0, 0)
