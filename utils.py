@@ -125,31 +125,19 @@ def _extract_line_endpoints_canvas(obj: dict) -> tuple[tuple[float, float], tupl
     return max(candidates, key=_score)
 
 
-def _extract_circle_canvas(obj: dict) -> tuple[float, float, float]:
+def _extract_circle_canvas(obj: dict) -> tuple[float, float, float, float]:
     left = float(obj.get("left", 0.0))
     top = float(obj.get("top", 0.0))
     radius = float(obj.get("radius", 0.0))
     scale_x = float(obj.get("scaleX", 1.0))
     scale_y = float(obj.get("scaleY", 1.0))
 
-    rx = radius * scale_x
-    ry = radius * scale_y
-    r = (abs(rx) + abs(ry)) / 2.0
-
-    origin_x = str(obj.get("originX", "left")).lower()
-    origin_y = str(obj.get("originY", "top")).lower()
-
-    if origin_x == "center":
-        cx = left
-    else:
-        cx = left + rx
-
-    if origin_y == "center":
-        cy = top
-    else:
-        cy = top + ry
-
-    return cx, cy, abs(r)
+    # Fabric circle: left/top are top-left of bounding box in canvas coords.
+    rx = abs(radius * scale_x)
+    ry = abs(radius * scale_y)
+    cx = left + rx
+    cy = top + ry
+    return cx, cy, rx, ry
 
 
 def extract_geometry(obj: dict):
@@ -166,12 +154,13 @@ def extract_geometry(obj: dict):
         }
 
     if tool == "circle":
-        cx, cy, r = _extract_circle_canvas(obj)
+        cx, cy, rx, ry = _extract_circle_canvas(obj)
         return {
             "type": "circle",
             "cx": float(cx),
             "cy": float(cy),
-            "r": float(r),
+            "rx": float(rx),
+            "ry": float(ry),
         }
 
     return None
@@ -182,7 +171,9 @@ def compute_measurement(geom: dict) -> float:
     if geom["type"] == "line":
         return math.hypot(geom["x2"] - geom["x1"], geom["y2"] - geom["y1"])
     if geom["type"] == "circle":
-        return 2.0 * geom["r"]
+        rx = abs(float(geom.get("rx", geom.get("r", 0.0))))
+        ry = abs(float(geom.get("ry", geom.get("r", 0.0))))
+        return 2.0 * ((rx + ry) / 2.0)
     return 0.0
 
 
@@ -197,13 +188,12 @@ def _geometry_to_image_space(geom: dict, canvas_to_img_scale: tuple[float, float
             "y2": geom["y2"] * sy,
         }
 
-    # keep circles visually circular when aspect ratio is preserved; average if tiny rounding differs
-    avg_s = (sx + sy) / 2.0
     return {
         "type": "circle",
         "cx": geom["cx"] * sx,
         "cy": geom["cy"] * sy,
-        "r": geom["r"] * avg_s,
+        "rx": geom.get("rx", geom.get("r", 0.0)) * sx,
+        "ry": geom.get("ry", geom.get("r", 0.0)) * sy,
     }
 
 
@@ -228,6 +218,31 @@ def get_annotation_debug_info(img_w: int) -> dict:
         "font_path": font_path,
         "font_is_default": is_default,
     }
+
+
+def get_first_circle_debug(objects):
+    """Return raw + computed debug info for the first circle object in canvas coords."""
+    for obj in objects:
+        if _shape_tool(obj) != "circle":
+            continue
+        left = float(obj.get("left", 0.0))
+        top = float(obj.get("top", 0.0))
+        radius = float(obj.get("radius", 0.0))
+        scale_x = float(obj.get("scaleX", 1.0))
+        scale_y = float(obj.get("scaleY", 1.0))
+        cx, cy, rx, ry = _extract_circle_canvas(obj)
+        return {
+            "left": left,
+            "top": top,
+            "radius": radius,
+            "scaleX": scale_x,
+            "scaleY": scale_y,
+            "cx": cx,
+            "cy": cy,
+            "rx": rx,
+            "ry": ry,
+        }
+    return None
 
 
 def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> tuple[int, int]:
@@ -297,10 +312,12 @@ def annotate_image(
         else:
             cx = geom_img["cx"]
             cy = geom_img["cy"]
-            r = geom_img["r"]
-            draw.ellipse([(cx - r, cy - r), (cx + r, cy + r)], outline=color, width=stroke)
-            label_x = cx + r + 12
-            label_y = cy - r - 12
+            rx = abs(float(geom_img.get("rx", geom_img.get("r", 0.0))))
+            ry = abs(float(geom_img.get("ry", geom_img.get("r", 0.0))))
+            draw.ellipse([(cx - rx, cy - ry), (cx + rx, cy + ry)], outline=color, width=stroke)
+            r_eff = (rx + ry) / 2.0
+            label_x = cx + r_eff + 12
+            label_y = cy - r_eff - 12
 
         text_w, text_h = _text_size(draw, label_text, font)
         tx, ty = _clamp_label(label_x, label_y, (text_w, text_h), image.size, margin=5)

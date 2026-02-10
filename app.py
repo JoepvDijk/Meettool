@@ -10,6 +10,7 @@ from utils import (
     csv_rows,
     extract_geometry,
     get_annotation_debug_info,
+    get_first_circle_debug,
     load_scale,
     save_scale,
 )
@@ -105,8 +106,9 @@ for idx, obj in enumerate(objects, start=1):
         line_geometries.append({"idx": idx, "measurement_px": measurement_px})
         tool_name = "Line"
     else:
-        r = geom["r"] * ((scale_x + scale_y) / 2.0)
-        measurement_px = 2.0 * r
+        rx = abs(float(geom.get("rx", geom.get("r", 0.0)))) * scale_x
+        ry = abs(float(geom.get("ry", geom.get("r", 0.0)))) * scale_y
+        measurement_px = 2.0 * ((rx + ry) / 2.0)
         tool_name = "Circle"
 
     if measurement_px <= 0:
@@ -159,6 +161,15 @@ st.caption(
     f"img=({img_w}x{img_h}) | display=({display_w}x{display_h}) | "
     f"font={debug_info['font_path']} | font_size={debug_info['font_size']}"
 )
+circle_debug = get_first_circle_debug(objects)
+if circle_debug:
+    st.caption(
+        "Circle debug (first): "
+        f"left={circle_debug['left']:.2f}, top={circle_debug['top']:.2f}, "
+        f"radius={circle_debug['radius']:.2f}, scaleX={circle_debug['scaleX']:.3f}, "
+        f"scaleY={circle_debug['scaleY']:.3f}, cx={circle_debug['cx']:.2f}, "
+        f"cy={circle_debug['cy']:.2f}, rx={circle_debug['rx']:.2f}, ry={circle_debug['ry']:.2f}"
+    )
 
 st.caption(
     f"Shapes: {len(measurements)} | Scale: {st.session_state.scale_um_per_px:.9f} µm/px"
