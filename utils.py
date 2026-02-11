@@ -4,6 +4,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from PIL import Image, ImageDraw, ImageFont
+
 SETTINGS_FILE = Path("settings.json")
 
 
@@ -129,6 +131,8 @@ def ensure_shape_ids(shapes: List[Dict[str, Any]], next_id: int) -> Tuple[List[D
 
 
 def make_label_object(shape_id: str, text: str, x: float, y: float, font_size: int) -> Dict[str, Any]:
+    from uuid import uuid4
+
     return {
         "type": "textbox",
         "text": text,
@@ -143,7 +147,9 @@ def make_label_object(shape_id: str, text: str, x: float, y: float, font_size: i
         "hasControls": True,
         "hasBorders": True,
         "isLabel": True,
+        "labelId": str(uuid4()),
         "labelFor": shape_id,
+        "userMoved": False,
     }
 
 
@@ -233,3 +239,81 @@ def csv_rows(filename: str, measurements: List[Dict[str, Any]], scale_um_per_px:
             f"{filename},{m['tool']},{m['measurement_px']:.4f},{m['measurement_um']:.4f},{scale_um_per_px:.9f},{timestamp}\n"
         )
     return "".join(lines)
+
+
+def _load_font(size: int) -> ImageFont.ImageFont:
+    candidates = [
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial.ttf",
+        "/System/Library/Fonts/Supplemental/Helvetica.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ]
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _parse_fill(fill: Any) -> Tuple[int, int, int]:
+    text = str(fill or "").strip().lower()
+    if text.startswith("rgb(") and text.endswith(")"):
+        try:
+            parts = text[4:-1].split(",")
+            return int(parts[0]), int(parts[1]), int(parts[2])
+        except (ValueError, IndexError):
+            return (255, 0, 0)
+    if text in {"red", "#ff0000"}:
+        return (255, 0, 0)
+    return (255, 0, 0)
+
+
+def render_base(image_pil: Image.Image, shapes: List[Dict[str, Any]], scale_x: float, scale_y: float) -> Image.Image:
+    """Render original image + shape overlays (no text labels)."""
+    img = image_pil.convert("RGB").copy()
+    draw = ImageDraw.Draw(img)
+
+    for shape in shapes:
+        geom = extract_geometry(shape)
+        if not geom:
+            continue
+        if geom["type"] == "line":
+            x1 = geom["x1"] * scale_x
+            y1 = geom["y1"] * scale_y
+            x2 = geom["x2"] * scale_x
+            y2 = geom["y2"] * scale_y
+            draw.line([(x1, y1), (x2, y2)], fill=(255, 0, 0), width=4)
+        else:
+            cx = geom["cx"] * scale_x
+            cy = geom["cy"] * scale_y
+            rx = geom["rx"] * scale_x
+            ry = geom["ry"] * scale_y
+            draw.ellipse([(cx - rx, cy - ry), (cx + rx, cy + ry)], outline=(255, 0, 0), width=4)
+
+    return img
+
+
+def render_final_with_labels(
+    base_image_with_shapes: Image.Image,
+    labels: List[Dict[str, Any]],
+    scale_x: float,
+    scale_y: float,
+) -> Image.Image:
+    """Render labels onto base image. Label coords are canvas/display coordinates."""
+    img = base_image_with_shapes.convert("RGB").copy()
+    draw = ImageDraw.Draw(img)
+
+    for label in labels:
+        text = str(label.get("text", "")).strip()
+        if not text:
+            continue
+        x = float(label.get("left", 0.0)) * scale_x
+        y = float(label.get("top", 0.0)) * scale_y
+        font_size = int(max(10, round(float(label.get("fontSize", 50)) * ((scale_x + scale_y) / 2.0))))
+        font = _load_font(font_size)
+        fill = _parse_fill(label.get("fill"))
+        draw.text((x, y), text, font=font, fill=fill)
+
+    return img

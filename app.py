@@ -11,34 +11,35 @@ from utils import (
     extract_geometry,
     label_anchor_canvas,
     load_scale,
-    make_label_object,
     measurement_px_from_geometry,
+    render_base,
+    render_final_with_labels,
     save_scale,
-    split_shapes_and_labels,
 )
 
 DEFAULT_SCALE = 1.342281879  # 400 µm / 298 px
-MAX_W = 900
+CANVAS_W = 900
 
 st.set_page_config(page_title="Microscope Measurement Tool", layout="wide")
 st.title("Microscope Measurement Tool")
 
 if "scale_um_per_px" not in st.session_state:
     st.session_state.scale_um_per_px = load_scale(DEFAULT_SCALE)
-if "calibration_mode" not in st.session_state:
-    st.session_state.calibration_mode = False
-if "objects" not in st.session_state:
-    st.session_state.objects = []
 if "bg_bytes" not in st.session_state:
     st.session_state.bg_bytes = b""
 if "canvas_source_file" not in st.session_state:
     st.session_state.canvas_source_file = ""
+if "shapes" not in st.session_state:
+    st.session_state.shapes = []
+if "label_positions" not in st.session_state:
+    st.session_state.label_positions = {}
 if "prev_nonlabel_count" not in st.session_state:
     st.session_state.prev_nonlabel_count = 0
+if "calibration_mode" not in st.session_state:
+    st.session_state.calibration_mode = False
 
 uploaded_file = st.file_uploader("Upload image", type=["png", "jpg", "jpeg"])
-selected_tool = st.radio("Drawing mode", ["Line", "Circle"], horizontal=True)
-mode = st.radio("Mode", ["Draw", "Move labels"], horizontal=True)
+draw_tool = st.radio("Draw tool", ["Line", "Circle"], horizontal=True)
 
 with st.sidebar:
     st.header("Settings")
@@ -67,115 +68,83 @@ if not uploaded_file:
 if st.session_state.canvas_source_file != uploaded_file.name:
     st.session_state.canvas_source_file = uploaded_file.name
     st.session_state.bg_bytes = uploaded_file.getvalue()
-    st.session_state.objects = []
+    st.session_state.shapes = []
+    st.session_state.label_positions = {}
     st.session_state.prev_nonlabel_count = 0
 
 if not st.session_state.bg_bytes:
     st.session_state.bg_bytes = uploaded_file.getvalue()
 
-image = Image.open(BytesIO(st.session_state.bg_bytes))
-img_w, img_h = image.size
+original_image = Image.open(BytesIO(st.session_state.bg_bytes)).convert("RGB")
+img_w, img_h = original_image.size
 
-display_w = min(img_w, MAX_W)
+display_w = CANVAS_W
 display_h = int(img_h * (display_w / img_w))
 scale_x = img_w / display_w
 scale_y = img_h / display_h
 
+draw_background = original_image.resize((display_w, display_h), Image.LANCZOS)
+
+st.subheader("Canvas 1: Draw Shapes")
 if st.session_state.calibration_mode:
     st.warning("Calibration mode enabled: draw one LINE over the known scale bar.")
-    drawing_mode = "line"
+    draw_mode = "line"
 else:
-    if mode == "Move labels":
-        drawing_mode = "transform"
-    else:
-        drawing_mode = "line" if selected_tool == "Line" else "circle"
+    draw_mode = "line" if draw_tool == "Line" else "circle"
 
-
-def _apply_mode_interactivity(objects, mode_name):
-    updated = []
-    changed = False
-    for obj in objects:
-        new_obj = dict(obj)
-        is_label = bool(new_obj.get("isLabel", False))
-        if mode_name == "Move labels":
-            if is_label:
-                desired = {
-                    "selectable": True,
-                    "evented": True,
-                    "hasControls": True,
-                    "hasBorders": True,
-                }
-            else:
-                desired = {
-                    "selectable": False,
-                    "evented": False,
-                    "hasControls": False,
-                    "hasBorders": False,
-                }
-        else:
-            desired = {
-                "selectable": False,
-                "evented": False,
-                "hasControls": False,
-                "hasBorders": False,
-            }
-
-        for k, v in desired.items():
-            if new_obj.get(k) != v:
-                new_obj[k] = v
-                changed = True
-        updated.append(new_obj)
-    return updated, changed
-
-
-objects_for_canvas, mode_flags_changed = _apply_mode_interactivity(st.session_state.objects, mode)
-if mode_flags_changed:
-    st.session_state.objects = objects_for_canvas
-
-initial_drawing = {"version": "4.4.0", "objects": objects_for_canvas}
-canvas_result = st_canvas(
+draw_canvas = st_canvas(
     fill_color="rgba(255, 0, 0, 0.0)",
     stroke_width=2,
     stroke_color="#ff0000",
-    background_image=image,
+    background_image=draw_background,
     height=display_h,
     width=display_w,
-    drawing_mode=drawing_mode,
-    initial_drawing=initial_drawing,
+    drawing_mode=draw_mode,
+    initial_drawing={"version": "4.4.0", "objects": st.session_state.shapes},
     update_streamlit=True,
-    key="measure_canvas",
+    key="draw_canvas",
 )
 
-objects_live = st.session_state.objects
-if canvas_result.json_data and "objects" in canvas_result.json_data:
-    objects_live = canvas_result.json_data["objects"]
+live_draw_objects = []
+if draw_canvas.json_data and "objects" in draw_canvas.json_data:
+    live_draw_objects = draw_canvas.json_data["objects"]
 
-if not objects_live:
-    st.info("Draw a shape to see measurements.")
-    st.stop()
+# Persist shapes from draw canvas only when new data arrives.
+if live_draw_objects != st.session_state.shapes:
+    prev_shapes = [o for o in st.session_state.shapes if not o.get("isLabel")]
+    incoming_shapes = [o for o in live_draw_objects if not o.get("isLabel")]
+    synced_shapes = []
+    for idx, shp in enumerate(incoming_shapes):
+        new_shape = dict(shp)
+        # Keep stable ids if canvas dropped custom fields.
+        if not new_shape.get("shapeId") and idx < len(prev_shapes):
+            prev_id = prev_shapes[idx].get("shapeId")
+            if prev_id:
+                new_shape["shapeId"] = prev_id
+        if not new_shape.get("labelId") and idx < len(prev_shapes):
+            prev_label_id = prev_shapes[idx].get("labelId")
+            if prev_label_id:
+                new_shape["labelId"] = prev_label_id
+        synced_shapes.append(new_shape)
+    st.session_state.shapes = synced_shapes
 
-live_shapes, live_labels = split_shapes_and_labels(objects_live)
-nonlabel_count = len(live_shapes)
-if "prev_nonlabel_count" not in st.session_state:
-    st.session_state.prev_nonlabel_count = 0
-prev_nonlabel_count = int(st.session_state.prev_nonlabel_count)
-label_for_ids = {
-    str(lbl.get("labelFor", ""))
-    for lbl in live_labels
-    if lbl.get("isLabel") and lbl.get("labelFor")
-}
+shapes = st.session_state.shapes
 
-mutated = False
-new_labels = []
-if nonlabel_count > prev_nonlabel_count:
-    for shape in live_shapes:
+nonlabel_count = len(shapes)
+prev_count = int(st.session_state.prev_nonlabel_count)
+if nonlabel_count > prev_count:
+    for shape in shapes:
         shape_id = str(shape.get("shapeId", ""))
         if not shape_id:
             shape_id = str(uuid4())
             shape["shapeId"] = shape_id
-            mutated = True
 
-        if shape_id not in label_for_ids:
+        label_id = str(shape.get("labelId", "")).strip()
+        if not label_id:
+            label_id = f"label_{uuid4()}"
+            shape["labelId"] = label_id
+
+        if label_id not in st.session_state.label_positions:
             geom = extract_geometry(shape)
             if not geom:
                 continue
@@ -185,42 +154,46 @@ if nonlabel_count > prev_nonlabel_count:
             measurement_um = measurement_px * st.session_state.scale_um_per_px
             ax, ay = label_anchor_canvas(geom)
             lx, ly = clamp_label_canvas(ax, ay, display_w, display_h, margin=5)
-            new_labels.append(
-                make_label_object(
-                    shape_id=shape_id,
-                    text=f"{measurement_um:.2f} µm",
-                    x=lx,
-                    y=ly,
-                    font_size=50,
-                )
-            )
-            label_for_ids.add(shape_id)
-            mutated = True
+            st.session_state.label_positions[label_id] = {
+                "labelId": label_id,
+                "forShapeId": shape_id,
+                "left": lx,
+                "top": ly,
+                "text": f"{measurement_um:.2f} µm",
+                "fontSize": 50,
+                "fill": "rgb(255,0,0)",
+                "scaleX": 1.0,
+                "scaleY": 1.0,
+                "angle": 0.0,
+                "width": 200.0,
+                "height": 60.0,
+            }
+        else:
+            # Keep text refreshed for measurement updates without moving the label.
+            geom = extract_geometry(shape)
+            if geom:
+                measurement_px = measurement_px_from_geometry(geom, scale_x, scale_y)
+                if measurement_px > 0:
+                    measurement_um = measurement_px * st.session_state.scale_um_per_px
+                    st.session_state.label_positions[label_id]["text"] = f"{measurement_um:.2f} µm"
 
-if new_labels:
-    live_labels = live_labels + new_labels
-
-if mutated:
-    updated_objects = live_shapes + live_labels
-    updated_objects, _ = _apply_mode_interactivity(updated_objects, mode)
-    if updated_objects != st.session_state.objects:
-        st.session_state.objects = updated_objects
+# Remove labels for deleted shapes.
+active_label_ids = {str(s.get("labelId", "")).strip() for s in shapes if s.get("labelId")}
+for existing_label_id in list(st.session_state.label_positions.keys()):
+    if existing_label_id not in active_label_ids:
+        del st.session_state.label_positions[existing_label_id]
 
 st.session_state.prev_nonlabel_count = nonlabel_count
 
+# Measurements from shapes only.
 measurements = []
-circle_debug = []
-for idx, shape in enumerate(live_shapes, start=1):
-    if shape.get("isLabel"):
-        continue
+for idx, shape in enumerate(shapes, start=1):
     geom = extract_geometry(shape)
     if not geom:
         continue
-
     measurement_px = measurement_px_from_geometry(geom, scale_x, scale_y)
     if measurement_px <= 0:
         continue
-
     measurement_um = measurement_px * st.session_state.scale_um_per_px
     tool = "Line" if geom["type"] == "line" else "Circle"
     measurements.append(
@@ -233,25 +206,11 @@ for idx, shape in enumerate(live_shapes, start=1):
         }
     )
 
-    if geom["type"] == "circle" and not circle_debug:
-        circle_debug.append(
-            {
-                "left": float(shape.get("left", 0.0)),
-                "top": float(shape.get("top", 0.0)),
-                "radius": float(shape.get("radius", 0.0)),
-                "scaleX": float(shape.get("scaleX", 1.0)),
-                "scaleY": float(shape.get("scaleY", 1.0)),
-                "cx": geom["cx"],
-                "cy": geom["cy"],
-                "rx": geom["rx"],
-                "ry": geom["ry"],
-            }
-        )
-
 if not measurements:
-    st.info("No valid measurable shapes found yet.")
+    st.info("Draw a shape to see measurements.")
     st.stop()
 
+# Calibration based on latest line.
 if st.session_state.calibration_mode:
     line_rows = [m for m in measurements if m["tool"] == "Line"]
     if not line_rows:
@@ -270,20 +229,89 @@ if st.session_state.calibration_mode:
                 st.success("Scale saved to settings.json")
                 st.session_state.calibration_mode = False
 
-st.caption(
-    f"Debug: img=({img_w}x{img_h}) | display=({display_w}x{display_h}) | "
-    f"scale=({scale_x:.4f},{scale_y:.4f})"
-)
-if circle_debug:
-    d = circle_debug[0]
-    st.caption(
-        "Circle debug (first): "
-        f"left={d['left']:.2f}, top={d['top']:.2f}, radius={d['radius']:.2f}, "
-        f"scaleX={d['scaleX']:.3f}, scaleY={d['scaleY']:.3f}, "
-        f"cx={d['cx']:.2f}, cy={d['cy']:.2f}, rx={d['rx']:.2f}, ry={d['ry']:.2f}"
+# Build base annotated image (shapes only) in the same resized coordinate space.
+base_display = render_base(draw_background, shapes, scale_x=1.0, scale_y=1.0)
+
+label_objects_for_canvas = []
+for label_id, item in st.session_state.label_positions.items():
+    label_objects_for_canvas.append(
+        {
+            "type": "textbox",
+            "text": str(item.get("text", "")),
+            "left": float(item.get("left", 0.0)),
+            "top": float(item.get("top", 0.0)),
+            "fontSize": float(item.get("fontSize", 50)),
+            "fill": str(item.get("fill", "rgb(255,0,0)")),
+            "scaleX": float(item.get("scaleX", 1.0)),
+            "scaleY": float(item.get("scaleY", 1.0)),
+            "angle": float(item.get("angle", 0.0)),
+            "width": float(item.get("width", 200.0)),
+            "height": float(item.get("height", 60.0)),
+            "selectable": True,
+            "evented": True,
+            "hasControls": True,
+            "hasBorders": True,
+            "isLabel": True,
+            "labelId": str(label_id),
+            "forShapeId": str(item.get("forShapeId", "")),
+        }
     )
 
-st.caption(f"Shapes: {len(measurements)} | Scale: {st.session_state.scale_um_per_px:.9f} µm/px")
+st.subheader("Canvas 2: Drag Labels On Preview")
+label_canvas = st_canvas(
+    fill_color="rgba(255, 0, 0, 0.0)",
+    stroke_width=1,
+    stroke_color="#ff0000",
+    background_image=base_display,
+    height=display_h,
+    width=display_w,
+    drawing_mode="transform",
+    initial_drawing={"version": "4.4.0", "objects": label_objects_for_canvas},
+    update_streamlit=True,
+    key="label_canvas",
+)
+
+if st.button("Apply label positions"):
+    if label_canvas.json_data and "objects" in label_canvas.json_data:
+        live_label_objects = label_canvas.json_data["objects"]
+        for i, obj in enumerate(live_label_objects):
+            if not obj.get("isLabel"):
+                continue
+            label_id = str(obj.get("labelId", "")).strip()
+            if not label_id:
+                label_id = f"live_label_{i}"
+            st.session_state.label_positions[label_id] = {
+                "labelId": label_id,
+                "forShapeId": str(obj.get("forShapeId", obj.get("labelFor", ""))),
+                "left": float(obj.get("left", 0.0)),
+                "top": float(obj.get("top", 0.0)),
+                "text": str(obj.get("text", "")),
+                "fontSize": float(obj.get("fontSize", 50)),
+                "fill": str(obj.get("fill", "rgb(255,0,0)")),
+                "scaleX": float(obj.get("scaleX", 1.0)),
+                "scaleY": float(obj.get("scaleY", 1.0)),
+                "angle": float(obj.get("angle", 0.0)),
+                "width": float(obj.get("width", 200.0)),
+                "height": float(obj.get("height", 60.0)),
+            }
+        st.success("Label positions applied")
+
+# Final export image = base + labels in the same display coordinate system.
+final_full = render_final_with_labels(base_display, label_objects_for_canvas, scale_x=1.0, scale_y=1.0)
+
+png_buf = BytesIO()
+final_full.save(png_buf, format="PNG")
+st.download_button(
+    "Download annotated PNG",
+    data=png_buf.getvalue(),
+    file_name=f"annotated_{uploaded_file.name.rsplit('.', 1)[0]}.png",
+    mime="image/png",
+)
+
+st.caption(
+    f"Debug: img=({img_w}x{img_h}) | display=({display_w}x{display_h}) | "
+    f"scale=({scale_x:.4f},{scale_y:.4f}) | shapes={len(shapes)} labels={len(st.session_state.label_positions)}"
+)
 
 table_rows = []
 for m in measurements:
@@ -299,19 +327,6 @@ for m in measurements:
     )
 
 st.dataframe(table_rows, hide_index=True, use_container_width=True)
-
-if canvas_result.image_data is not None:
-    overlay = Image.fromarray(canvas_result.image_data.astype("uint8"), mode="RGBA")
-    background = image.convert("RGBA").resize((display_w, display_h), Image.LANCZOS)
-    out_image = Image.alpha_composite(background, overlay)
-    out_buffer = BytesIO()
-    out_image.save(out_buffer, format="PNG")
-    st.download_button(
-        "Download canvas image",
-        data=out_buffer.getvalue(),
-        file_name=f"canvas_{uploaded_file.name.rsplit('.', 1)[0]}.png",
-        mime="image/png",
-    )
 
 csv_data = csv_rows(
     filename=uploaded_file.name,
