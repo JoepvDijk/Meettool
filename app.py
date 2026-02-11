@@ -16,10 +16,19 @@ from utils import (
 )
 
 DEFAULT_SCALE = 1.342281879  # 400 µm / 298 px
-TARGET_DISPLAY_W = 1000
+MAX_W = 1100
+MAX_H = 650
 
 st.set_page_config(page_title="Microscope Measurement Tool", layout="wide")
 st.title("Microscope Measurement Tool")
+st.markdown(
+    """
+<style>
+  .block-container { padding-left: 2rem; padding-right: 2rem; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
 if "scale_um_per_px" not in st.session_state:
     st.session_state.scale_um_per_px = load_scale(DEFAULT_SCALE)
@@ -74,7 +83,9 @@ if not st.session_state.bg_bytes:
 
 image = Image.open(BytesIO(st.session_state.bg_bytes)).convert("RGB")
 img_w, img_h = image.size
-display_scale = min(1.0, float(TARGET_DISPLAY_W) / float(img_w))
+scale_w = float(MAX_W) / float(img_w)
+scale_h = float(MAX_H) / float(img_h)
+display_scale = min(1.0, scale_w, scale_h)
 CANVAS_W = int(img_w * display_scale)
 CANVAS_H = int(img_h * display_scale)
 st.session_state.display_scale = display_scale
