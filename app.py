@@ -1,6 +1,7 @@
 from io import BytesIO, StringIO
 from uuid import uuid4
 
+import pandas as pd
 import streamlit as st
 from PIL import Image
 from streamlit_drawable_canvas import st_canvas
@@ -18,6 +19,23 @@ from utils import (
 DEFAULT_SCALE = 1.342281879  # 400 µm / 298 px
 MAX_W = 1100
 MAX_H = 650
+PALETTE = {
+    "red": "#ff0000",
+    "blue": "#0066ff",
+    "yellow": "#ffd400",
+    "green": "#00b050",
+    "purple": "#7f00ff",
+    "orange": "#ff7a00",
+}
+COLOR_LABEL_TO_KEY = {
+    "Red": "red",
+    "Blue": "blue",
+    "Yellow": "yellow",
+    "Green": "green",
+    "Purple": "purple",
+    "Orange": "orange",
+}
+COLOR_KEY_TO_LABEL = {v: k for k, v in COLOR_LABEL_TO_KEY.items()}
 
 st.set_page_config(page_title="Microscope Measurement Tool", layout="wide")
 st.title("Microscope Measurement Tool")
@@ -122,6 +140,7 @@ if draw_canvas.json_data and "objects" in draw_canvas.json_data:
 if live_draw_objects:
     # Keep stable ids; if incoming object lost id, reuse by index where possible.
     prev_shapes = st.session_state.shapes
+    prev_shapes_by_id = {str(s.get("id", "")): s for s in prev_shapes if s.get("id")}
     synced_shapes = []
     for idx, obj in enumerate(live_draw_objects):
         shape = dict(obj)
@@ -133,6 +152,14 @@ if live_draw_objects:
         if not shape_id:
             shape_id = f"shape_{uuid4()}"
         shape["id"] = shape_id
+        prev_shape = prev_shapes_by_id.get(shape_id, {})
+        color_key = str(shape.get("color", prev_shape.get("color", "red"))).lower()
+        if color_key not in PALETTE:
+            color_key = "red"
+        shape["color"] = color_key
+        shape["stroke"] = PALETTE[color_key]
+        if str(shape.get("type", "")).lower() == "circle":
+            shape["fill"] = str(shape.get("fill", "rgba(0,0,0,0)"))
         synced_shapes.append(shape)
     if synced_shapes != st.session_state.shapes:
         st.session_state.shapes = synced_shapes
@@ -170,6 +197,7 @@ for idx, shape in enumerate(shapes, start=1):
             "tool": tool,
             "measurement_px": measurement_px,
             "measurement_um": measurement_um,
+            "color": str(shape.get("color", "red")),
         }
     )
 
@@ -183,7 +211,7 @@ for idx, shape in enumerate(shapes, start=1):
             "left": lx,
             "top": ly,
             "fontSize": 50,
-            "fill": "rgb(255,0,0)",
+            "fill": PALETTE.get(str(shape.get("color", "red")), "#ff0000"),
             "selectable": True,
             "evented": True,
             "editable": True,
@@ -197,6 +225,7 @@ for idx, shape in enumerate(shapes, start=1):
     else:
         # Reuse existing position/size; only refresh text.
         label["text"] = f"{measurement_um:.2f} µm"
+        label["fill"] = PALETTE.get(str(shape.get("color", "red")), "#ff0000")
 
 # Remove labels for deleted shapes.
 for stored_shape_id in list(st.session_state.labels_by_shape_id.keys()):
@@ -303,15 +332,54 @@ for m in measurements:
     metric = "Length" if m["tool"] == "Line" else "Diameter"
     table_rows.append(
         {
+            "shape_id": m["shape_id"],
             "#": m["index"],
             "Tool": m["tool"],
             "Metric": metric,
-            "Pixels": f"{m['measurement_px']:.2f}",
-            "µm": f"{m['measurement_um']:.2f}",
+            "Pixels": round(m["measurement_px"], 2),
+            "µm": round(m["measurement_um"], 2),
+            "Color": COLOR_KEY_TO_LABEL.get(str(m.get("color", "red")), "Red"),
         }
     )
 
-st.dataframe(table_rows, hide_index=True, use_container_width=True)
+table_df = pd.DataFrame(table_rows)
+edited_df = st.data_editor(
+    table_df,
+    hide_index=True,
+    use_container_width=True,
+    column_config={
+        "Color": st.column_config.SelectboxColumn("Color", options=list(COLOR_LABEL_TO_KEY.keys()))
+    },
+    disabled=["shape_id", "#", "Tool", "Metric", "Pixels", "µm"],
+    key="measurements_editor",
+)
+
+edited_shape_colors = {}
+for _, row in edited_df.iterrows():
+    sid = str(row["shape_id"])
+    color_key = COLOR_LABEL_TO_KEY.get(str(row["Color"]), "red")
+    edited_shape_colors[sid] = color_key
+
+shapes_color_changed = False
+for shape in st.session_state.shapes:
+    sid = str(shape.get("id", ""))
+    if not sid:
+        continue
+    new_color = edited_shape_colors.get(sid, str(shape.get("color", "red")))
+    if new_color not in PALETTE:
+        new_color = "red"
+    if str(shape.get("color", "red")) != new_color:
+        shape["color"] = new_color
+        shape["stroke"] = PALETTE[new_color]
+        if str(shape.get("type", "")).lower() == "circle":
+            shape["fill"] = str(shape.get("fill", "rgba(0,0,0,0)"))
+        label_obj = st.session_state.labels_by_shape_id.get(sid)
+        if label_obj:
+            label_obj["fill"] = PALETTE[new_color]
+        shapes_color_changed = True
+
+if shapes_color_changed:
+    st.session_state.shapes = [dict(s) for s in st.session_state.shapes]
 
 csv_data = csv_rows(
     filename=uploaded_file.name,
